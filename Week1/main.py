@@ -26,66 +26,96 @@ def test(
     dataset: List[Tuple[Type[Image.Image], int]],
     bovw: Type[BOVW],
     classifier: Type[object],
+    batch_size: int = 50,
 ):
-    test_descriptors = []
-    descriptors_labels = []
+    all_histograms = []
+    all_labels = []
 
-    for idx in tqdm.tqdm(
-        range(len(dataset)), desc="Phase [Eval]: Extracting the descriptors"
+    for i in tqdm.tqdm(
+        range(0, len(dataset), batch_size), desc="Phase [Eval]: Testing"
     ):
-        image, label, img_path = dataset[idx]
-        # _, descriptors = bovw._extract_features(image=np.array(image))
-        _, descriptors = bovw._extract_features_dense(
-            image=np.array(image), image_path=Path(img_path)
-        )
+        batch = dataset[i : i + batch_size]
+        batch_descriptors = []
+        batch_labels = []
 
-        if descriptors is not None:
-            test_descriptors.append(descriptors)
-            descriptors_labels.append(label)
+        for image, label, img_path in batch:
+            _, descriptors = bovw._extract_features_dense(
+                image=np.array(image), image_path=Path(img_path)
+            )
 
-    print("Computing the bovw histograms")
-    bovw_histograms = extract_bovw_histograms(descriptors=test_descriptors, bovw=bovw)
+            if descriptors is not None and len(descriptors) > 0:
+                batch_descriptors.append(descriptors)
+                batch_labels.append(label)
+
+        if batch_descriptors:
+            histograms = extract_bovw_histograms(
+                descriptors=batch_descriptors, bovw=bovw
+            )
+            all_histograms.extend(histograms)
+            all_labels.extend(batch_labels)
 
     print("predicting the values")
-    y_pred = classifier.predict(bovw_histograms)
+    y_pred = classifier.predict(all_histograms)
 
     print(
         "Accuracy on Phase[Test]:",
-        accuracy_score(y_true=descriptors_labels, y_pred=y_pred),
+        accuracy_score(y_true=all_labels, y_pred=y_pred),
     )
 
 
-def train(dataset: List[Tuple[Type[Image.Image], int]], bovw: Type[BOVW]):
-    all_descriptors = []
+def train(
+    dataset: List[Tuple[Type[Image.Image], int]], bovw: Type[BOVW], batch_size: int = 50
+):
+    # Phase 1: Fit Codebook progressively
+    print("Phase [Training]: Fitting Codebook progressively")
+
+    for i in tqdm.tqdm(range(0, len(dataset), batch_size), desc="Fitting Codebook"):
+        batch = dataset[i : i + batch_size]
+        batch_descriptors = []
+
+        for image, label, img_path in batch:
+            _, descriptors = bovw._extract_features_dense(
+                image=np.array(image), image_path=Path(img_path)
+            )
+            if descriptors is not None and len(descriptors) > 0:
+                batch_descriptors.append(descriptors)
+
+        if batch_descriptors:
+            bovw._update_fit_codebook(descriptors=batch_descriptors)
+
+    # Phase 2: Compute Histograms for Classifier
+    print("Phase [Training]: Computing Histograms")
+    all_histograms = []
     all_labels = []
 
-    for idx in tqdm.tqdm(
-        range(len(dataset)), desc="Phase [Training]: Extracting the descriptors"
-    ):
-        image, label, img_path = dataset[idx]
-        # _, descriptors = bovw._extract_features(image=np.array(image))
-        _, descriptors = bovw._extract_features_dense(
-            image=np.array(image), image_path=Path(img_path)
-        )
+    for i in tqdm.tqdm(range(0, len(dataset), batch_size), desc="Computing Histograms"):
+        batch = dataset[i : i + batch_size]
+        batch_descriptors = []
+        batch_labels = []
 
-        if descriptors is not None:
-            all_descriptors.append(descriptors)
-            all_labels.append(label)
+        for image, label, img_path in batch:
+            _, descriptors = bovw._extract_features_dense(
+                image=np.array(image), image_path=Path(img_path)
+            )
+            if descriptors is not None and len(descriptors) > 0:
+                batch_descriptors.append(descriptors)
+                batch_labels.append(label)
 
-    print("Fitting the codebook")
-    kmeans, cluster_centers = bovw._update_fit_codebook(descriptors=all_descriptors)
-
-    print("Computing the bovw histograms")
-    bovw_histograms = extract_bovw_histograms(descriptors=all_descriptors, bovw=bovw)
+        if batch_descriptors:
+            histograms = extract_bovw_histograms(
+                descriptors=batch_descriptors, bovw=bovw
+            )
+            all_histograms.extend(histograms)
+            all_labels.extend(batch_labels)
 
     print("Fitting the classifier")
     classifier = LogisticRegression(class_weight="balanced").fit(
-        bovw_histograms, all_labels
+        all_histograms, all_labels
     )
 
     print(
         "Accuracy on Phase[Train]:",
-        accuracy_score(y_true=all_labels, y_pred=classifier.predict(bovw_histograms)),
+        accuracy_score(y_true=all_labels, y_pred=classifier.predict(all_histograms)),
     )
 
     return bovw, classifier

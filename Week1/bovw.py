@@ -42,14 +42,22 @@ class BOVW:
         step_size: int = 1,
         patch_size: int = 16,
     ) -> Tuple:
+        save_path = image_path.with_suffix(".npy")
+        if save_path.exists():
+            descriptors = np.load(save_path)
+            return [], descriptors
+
         keypoints = []
         for y in range(0, image.shape[0], step_size):
             for x in range(0, image.shape[1], step_size):
                 keypoints.append(cv2.KeyPoint(x, y, patch_size))
 
         keypoints, descriptors = self.detector.compute(image, keypoints)
+
+        if descriptors is None:
+            descriptors = np.array([])
+
         # Save descriptors to a .npy file with the same folder structure
-        save_path = image_path.with_suffix(".npy")
         save_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(save_path, descriptors)
 
