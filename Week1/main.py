@@ -157,9 +157,9 @@ def Dataset(
 if __name__ == "__main__":
     # /home/cboned/data/Master/MIT_split
     data_train = Dataset(ImageFolder="./data/train")
-    data_test = Dataset(ImageFolder="./data/test")
+    data_test = Dataset(ImageFolder="./data/val")
 
-    bovw = BOVW()
+    bovw = BOVW(detector_type="SIFT")
 
     bovw, classifier = train(dataset=data_train, bovw=bovw)
 
