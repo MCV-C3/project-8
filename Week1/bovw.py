@@ -41,25 +41,41 @@ class BOVW:
         image_path: Path,
         step_size: int = 1,
         patch_size: int = 16,
+        force_recompute: bool = False,
+        save_descriptor: bool = True,
     ) -> Tuple:
         save_path = image_path.with_suffix(".npy")
-        if save_path.exists():
+        if save_path.exists() and not force_recompute:
             descriptors = np.load(save_path)
-            return [], descriptors
+            if step_size == -1 and patch_size == -1:
+                return self.detector.detectAndCompute(image, None)
+            elif step_size == 1 and patch_size == 16:
+                return [], descriptors
+            else:
+                new_descriptors = []
+                for y in range(0, image.shape[0], step_size):
+                    for x in range(0, image.shape[1], step_size):
+                        index = y * image.shape[1] + x
+                        new_descriptors.append(descriptors[index])
+                return [], np.array(new_descriptors)
 
-        keypoints = []
-        for y in range(0, image.shape[0], step_size):
-            for x in range(0, image.shape[1], step_size):
-                keypoints.append(cv2.KeyPoint(x, y, patch_size))
+        if step_size == -1 and patch_size == -1:
+            keypoints, descriptors = self.detector.detectAndCompute(image, None)
+        else:
+            keypoints = []
+            for y in range(0, image.shape[0], step_size):
+                for x in range(0, image.shape[1], step_size):
+                    keypoints.append(cv2.KeyPoint(x, y, patch_size))
 
-        keypoints, descriptors = self.detector.compute(image, keypoints)
+            keypoints, descriptors = self.detector.compute(image, keypoints)
 
         if descriptors is None:
             descriptors = np.array([])
 
         # Save descriptors to a .npy file with the same folder structure
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(save_path, descriptors)
+        if save_descriptor:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(save_path, descriptors)
 
         return keypoints, descriptors
 
