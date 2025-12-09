@@ -9,6 +9,7 @@ from bovw import BOVW
 from natsort import natsorted
 from PIL import Image
 from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -294,6 +295,78 @@ def Dataset(
             dataset.append((img_pil, map_classes[cls_folder], img))
 
     return dataset, map_classes
+
+
+def cross_validate(
+    dataset: List[Tuple[Type[Image.Image], int]],
+    map_classes: dict,
+    n_splits: int = 5,
+    batch_size: int = 50,
+    step_size: int = 1,
+    patch_size: int = 16,
+    spatial_level: int = 1,
+    detector_type: str = "SIFT",
+    codebook_size: int = 800,
+):
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=73)
+
+    # Extract labels for stratification
+    labels = [item[1] for item in dataset]
+
+    metrics_list = []
+
+    for fold, (train_index, test_index) in enumerate(skf.split(dataset, labels)):
+        print(f"\nFold {fold + 1}/{n_splits}")
+
+        train_subset = [dataset[i] for i in train_index]
+        test_subset = [dataset[i] for i in test_index]
+
+        bovw = BOVW(detector_type=detector_type, codebook_size=codebook_size)
+
+        bovw, classifier = train(
+            dataset=train_subset,
+            bovw=bovw,
+            map_classes=map_classes,
+            batch_size=batch_size,
+            step_size=step_size,
+            patch_size=patch_size,
+            spatial_level=spatial_level,
+        )
+
+        metrics = test(
+            dataset=test_subset,
+            bovw=bovw,
+            classifier=classifier,
+            map_classes=map_classes,
+            batch_size=batch_size,
+            step_size=step_size,
+            patch_size=patch_size,
+            spatial_level=spatial_level,
+        )
+        metrics_list.append(metrics)
+
+    # Aggregate metrics
+    avg_metrics = {}
+    std_metrics = {}
+
+    keys = metrics_list[0].keys()
+    for key in keys:
+        if isinstance(metrics_list[0][key], (int, float, np.number)):
+            values = [m[key] for m in metrics_list]
+            avg_metrics[key] = np.mean(values)
+            std_metrics[key] = np.std(values)
+        elif key == "auc_scores":  # Handle list of scores
+            values = np.array([m[key] for m in metrics_list])
+            avg_metrics[key] = np.mean(values, axis=0).tolist()
+            std_metrics[key] = np.std(values, axis=0).tolist()
+        # Skip complex types like false_positive_rates for simple averaging
+
+    print("\nCross-Validation Results:")
+    for key in avg_metrics:
+        if key in ["accuracy", "precision", "recall", "f1_score", "auc_average"]:
+            print(f" - {key}: {avg_metrics[key]:.4f} (+/- {std_metrics[key]:.4f})")
+
+    return avg_metrics, std_metrics
 
 
 if __name__ == "__main__":
