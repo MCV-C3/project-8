@@ -1,7 +1,7 @@
 import glob
 import os
 from pathlib import Path
-from typing import List, Literal, Tuple, Type
+from typing import List, Tuple, Type
 
 import numpy as np
 import tqdm
@@ -9,40 +9,54 @@ from bovw import BOVW
 from natsort import natsorted
 from PIL import Image
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import auc, f1_score, precision_score, recall_score, roc_curve
+from sklearn.metrics import (
+    accuracy_score,
+    auc,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_curve,
+)
 
 
-def extract_bovw_histograms(bovw: Type[BOVW], descriptors: Literal["N", "T", "d"]):
-    return np.array(
-        [
-            bovw._compute_codebook_descriptor(
-                descriptors=descriptor, kmeans=bovw.codebook_algo
-            )
-            for descriptor in descriptors
-        ]
-    )
+def extract_bovw_histograms(bovw: Type[BOVW], descriptors: List[List[np.ndarray]]):
+    all_histograms = []
+    for image_descriptors in descriptors:
+        image_histogram = []
+        for region_descriptors in image_descriptors:
+            if region_descriptors is None or len(region_descriptors) == 0:
+                hist = np.zeros(bovw.codebook_size)
+            else:
+                hist = bovw._compute_codebook_descriptor(
+                    descriptors=region_descriptors, kmeans=bovw.codebook_algo
+                )
+            image_histogram.extend(hist)
+        all_histograms.append(image_histogram)
+    return np.array(all_histograms)
 
 
-def compute_metrics(y_true: List[int], y_pred: List[int], map_classes: dict):
+def compute_metrics(
+    y_true: List[int], y_pred: List[int], y_probs: np.ndarray, map_classes: dict
+):
+    accuracy = accuracy_score(y_true, y_pred)
     precision = precision_score(y_true, y_pred, average="weighted")
     recall = recall_score(y_true, y_pred, average="weighted")
     f1 = f1_score(y_true, y_pred, average="weighted")
 
     n_classes = len(map_classes)
-    false_positive_rates = []
-    true_positive_rates = []
+    false_positive_rates = [0] * n_classes
+    true_positive_rates = [0] * n_classes
     auc_scores = []
 
     for i in range(n_classes):
         y_mask = [1 if label == i else 0 for label in y_true]
-        y_pred_mask = [1 if label == i else 0 for label in y_pred]
-        false_positive_rates[i], true_positive_rates[i], _ = roc_curve(
-            y_mask, y_pred_mask
-        )
+        y_score = y_probs[:, i]
+        false_positive_rates[i], true_positive_rates[i], _ = roc_curve(y_mask, y_score)
         auc_scores.append(auc(false_positive_rates[i], true_positive_rates[i]))
     auc_average = np.sum(auc_scores) / n_classes
 
     return {
+        "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
         "f1_score": f1,
@@ -60,6 +74,10 @@ def test(
     classifier: Type[object],
     map_classes: dict,
     batch_size: int = 50,
+    step_size: int = 1,
+    patch_size: int = 16,
+    spatial_pyramid: bool = False,
+    spatial_level: int = 1,
 ):
     all_histograms = []
     all_labels = []
@@ -72,13 +90,39 @@ def test(
         batch_labels = []
 
         for image, label, img_path in batch:
-            _, descriptors = bovw._extract_features_dense(
-                image=np.array(image), image_path=Path(img_path)
-            )
+            tmp_descriptors = []
+            for level_idx in range(spatial_level):
+                div = 2**level_idx
+                x_step = image.width // div
+                y_step = image.height // div
+                for i in range(div):
+                    for j in range(div):
+                        crop_box = (
+                            i * x_step,
+                            j * y_step,
+                            (i + 1) * x_step
+                            if (i + 1) * x_step < image.width
+                            else image.width,
+                            (j + 1) * y_step
+                            if (j + 1) * y_step < image.height
+                            else image.height,
+                        )
+                        cropped_image = image.crop(crop_box)
+                        _, descriptors = bovw._extract_features_dense(
+                            image=np.array(cropped_image),
+                            image_path=Path(img_path),
+                            step_size=step_size,
+                            patch_size=patch_size,
+                            force_recompute=True,
+                            save_descriptor=False,
+                        )
+                        if descriptors is not None and len(descriptors) > 0:
+                            tmp_descriptors.append(descriptors)
+                        else:
+                            tmp_descriptors.append(np.array([]))
 
-            if descriptors is not None and len(descriptors) > 0:
-                batch_descriptors.append(descriptors)
-                batch_labels.append(label)
+            batch_descriptors.append(tmp_descriptors)
+            batch_labels.append(label)
 
         if batch_descriptors:
             histograms = extract_bovw_histograms(
@@ -89,13 +133,15 @@ def test(
 
     print("predicting the values")
     y_pred = classifier.predict(all_histograms)
+    y_probs = classifier.predict_proba(all_histograms)
 
-    output = compute_metrics(all_labels, y_pred, map_classes=map_classes)
+    output = compute_metrics(all_labels, y_pred, y_probs, map_classes=map_classes)
 
     aux_auc_per_class = {}
     for cls_name, cls_idx in map_classes.items():
         aux_auc_per_class[cls_name] = output["auc_scores"][cls_idx]
     print("Metrics on Phase[Eval]:")
+    print(f" - Accuracy: {output['accuracy']}")
     print(f" - Precision: {output['precision']}")
     print(f" - Recall: {output['recall']}")
     print(f" - F1 Score: {output['f1_score']}")
@@ -110,6 +156,9 @@ def train(
     bovw: Type[BOVW],
     map_classes: dict,
     batch_size: int = 50,
+    step_size: int = 1,
+    patch_size: int = 16,
+    spatial_level: int = 1,
 ):
     # Phase 1: Fit Codebook progressively
     print("Phase [Training]: Fitting Codebook progressively")
@@ -120,7 +169,12 @@ def train(
 
         for image, label, img_path in batch:
             _, descriptors = bovw._extract_features_dense(
-                image=np.array(image), image_path=Path(img_path)
+                image=np.array(image),
+                image_path=Path(img_path),
+                step_size=step_size,
+                patch_size=patch_size,
+                force_recompute=True,
+                save_descriptor=False,
             )
             if descriptors is not None and len(descriptors) > 0:
                 batch_descriptors.append(descriptors)
@@ -139,12 +193,39 @@ def train(
         batch_labels = []
 
         for image, label, img_path in batch:
-            _, descriptors = bovw._extract_features_dense(
-                image=np.array(image), image_path=Path(img_path)
-            )
-            if descriptors is not None and len(descriptors) > 0:
-                batch_descriptors.append(descriptors)
-                batch_labels.append(label)
+            tmp_descriptors = []
+            for level_idx in range(spatial_level):
+                div = 2**level_idx
+                x_step = image.width // div
+                y_step = image.height // div
+                for i in range(div):
+                    for j in range(div):
+                        crop_box = (
+                            i * x_step,
+                            j * y_step,
+                            (i + 1) * x_step
+                            if (i + 1) * x_step < image.width
+                            else image.width,
+                            (j + 1) * y_step
+                            if (j + 1) * y_step < image.height
+                            else image.height,
+                        )
+                        cropped_image = image.crop(crop_box)
+                        _, descriptors = bovw._extract_features_dense(
+                            image=np.array(cropped_image),
+                            image_path=Path(img_path),
+                            step_size=step_size,
+                            patch_size=patch_size,
+                            force_recompute=True,
+                            save_descriptor=False,
+                        )
+                        if descriptors is not None and len(descriptors) > 0:
+                            tmp_descriptors.append(descriptors)
+                        else:
+                            tmp_descriptors.append(np.array([]))
+
+            batch_descriptors.append(tmp_descriptors)
+            batch_labels.append(label)
 
         if batch_descriptors:
             histograms = extract_bovw_histograms(
@@ -159,13 +240,17 @@ def train(
     )
 
     output = compute_metrics(
-        all_labels, classifier.predict(all_histograms), map_classes=map_classes
+        all_labels,
+        classifier.predict(all_histograms),
+        classifier.predict_proba(all_histograms),
+        map_classes=map_classes,
     )
 
     auc_per_class = {}
     for cls_name, cls_idx in map_classes.items():
         auc_per_class[cls_name] = output["auc_scores"][cls_idx]
     print("Metrics on Phase[Train]:")
+    print(f" - Accuracy: {output['accuracy']}")
     print(f" - Precision: {output['precision']}")
     print(f" - Recall: {output['recall']}")
     print(f" - F1 Score: {output['f1_score']}")
