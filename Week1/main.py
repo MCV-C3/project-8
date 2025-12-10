@@ -1,15 +1,17 @@
 import glob
 import os
 from pathlib import Path
-from typing import List, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import tqdm
 from bovw import BOVW
 from natsort import natsorted
 from PIL import Image
+from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import make_pipeline
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -160,6 +162,7 @@ def train(
     step_size: int = 1,
     patch_size: int = 16,
     spatial_level: int = 1,
+    transformer: Optional[object] = None,
 ):
     # Phase 1: Fit Codebook progressively
     print("Phase [Training]: Fitting Codebook progressively")
@@ -236,9 +239,12 @@ def train(
             all_labels.extend(batch_labels)
 
     print("Fitting the classifier")
-    classifier = LogisticRegression(class_weight="balanced").fit(
-        all_histograms, all_labels
-    )
+    if transformer is not None:
+        model = make_pipeline(transformer, LogisticRegression(class_weight="balanced"))
+    else:
+        model = LogisticRegression(class_weight="balanced")
+
+    classifier = model.fit(all_histograms, all_labels)
 
     output = compute_metrics(
         all_labels,
@@ -307,6 +313,9 @@ def cross_validate(
     spatial_level: int = 1,
     detector_type: str = "SIFT",
     codebook_size: int = 800,
+    max_features: Optional[int] = None,
+    dim_reduction: Optional[str] = None,
+    dim_components: Optional[int] = None,
 ):
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=73)
 
@@ -321,7 +330,15 @@ def cross_validate(
         train_subset = [dataset[i] for i in train_index]
         test_subset = [dataset[i] for i in test_index]
 
-        bovw = BOVW(detector_type=detector_type, codebook_size=codebook_size)
+        bovw = BOVW(
+            detector_type=detector_type,
+            codebook_size=codebook_size,
+            max_features=max_features,
+        )
+
+        transformer = None
+        if dim_reduction == "pca":
+            transformer = PCA(n_components=dim_components) if dim_components else PCA()
 
         bovw, classifier = train(
             dataset=train_subset,
@@ -331,6 +348,7 @@ def cross_validate(
             step_size=step_size,
             patch_size=patch_size,
             spatial_level=spatial_level,
+            transformer=transformer,
         )
 
         metrics = test(

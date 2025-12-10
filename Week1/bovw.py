@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Literal, Tuple, Type
+from typing import Literal, Optional, Tuple, Type
 
 import cv2
 import matplotlib.pyplot as plt
@@ -13,14 +13,23 @@ class BOVW:
         self,
         detector_type="AKAZE",
         codebook_size: int = 50,
-        detector_kwargs: dict = {},
-        codebook_kwargs: dict = {},
+        detector_kwargs: Optional[dict] = None,
+        codebook_kwargs: Optional[dict] = None,
+        max_features: Optional[int] = None,
     ):
+        detector_kwargs = dict(detector_kwargs or {})
+        codebook_kwargs = dict(codebook_kwargs or {})
+        self.max_features = max_features
+
         if detector_type == "SIFT":
+            if max_features is not None and "nfeatures" not in detector_kwargs:
+                detector_kwargs["nfeatures"] = max_features
             self.detector = cv2.SIFT_create(**detector_kwargs)
         elif detector_type == "AKAZE":
             self.detector = cv2.AKAZE_create(**detector_kwargs)
         elif detector_type == "ORB":
+            if max_features is not None and "nfeatures" not in detector_kwargs:
+                detector_kwargs["nfeatures"] = max_features
             self.detector = cv2.ORB_create(**detector_kwargs)
         else:
             raise ValueError("Detector type must be 'SIFT', 'SURF', or 'ORB'")
@@ -32,7 +41,28 @@ class BOVW:
 
     ## Modify this function in order to be able to create a dense sift
     def _extract_features(self, image: Literal["H", "W", "C"]) -> Tuple:
-        return self.detector.detectAndCompute(image, None)
+        keypoints, descriptors = self.detector.detectAndCompute(image, None)
+        keypoints, descriptors = self._limit_features(keypoints, descriptors)
+        return keypoints, descriptors
+
+    def _limit_features(self, keypoints, descriptors):
+        if (
+            self.max_features is None
+            or descriptors is None
+            or not keypoints
+            or len(keypoints) <= self.max_features
+        ):
+            return keypoints, descriptors
+
+        # Keep the strongest keypoints according to the detector response
+        kp_desc_pairs = sorted(
+            zip(keypoints, descriptors),
+            key=lambda pair: pair[0].response,
+            reverse=True,
+        )[: self.max_features]
+
+        limited_keypoints, limited_descriptors = zip(*kp_desc_pairs)
+        return list(limited_keypoints), np.array(limited_descriptors)
 
     # Jialuo - Dense SIFT extraction, extracts and saves descriptors with the same folder structure
     def _extract_features_dense(
@@ -48,7 +78,8 @@ class BOVW:
         if save_path.exists() and not force_recompute:
             descriptors = np.load(save_path)
             if step_size == -1 and patch_size == -1:
-                return self.detector.detectAndCompute(image, None)
+                keypoints, descriptors = self.detector.detectAndCompute(image, None)
+                return self._limit_features(keypoints, descriptors)
             elif step_size == 1 and patch_size == 16:
                 return [], descriptors
             else:
@@ -61,6 +92,7 @@ class BOVW:
 
         if step_size == -1 and patch_size == -1:
             keypoints, descriptors = self.detector.detectAndCompute(image, None)
+            keypoints, descriptors = self._limit_features(keypoints, descriptors)
         else:
             keypoints = []
             for y in range(0, image.shape[0], step_size):
