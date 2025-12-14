@@ -1,13 +1,14 @@
-import torch
+from typing import List, Literal
+
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Literal, List
 
 Order = Literal[
-    "linear_bn_act_do",   # Linear -> BN -> GELU -> Dropout (el teu actual)
-    "do_linear_bn_act",   # Dropout -> Linear -> BN -> GELU (input dropout)
-    "bn_act_linear_do",   # BN -> GELU -> Linear -> Dropout (pre-activation style)
+    "linear_bn_act_do",  # Linear -> BN -> GELU -> Dropout (el teu actual)
+    "do_linear_bn_act",  # Dropout -> Linear -> BN -> GELU (input dropout)
+    "bn_act_linear_do",  # BN -> GELU -> Linear -> Dropout (pre-activation style)
 ]
+
 
 class SimpleModel(nn.Module):
     def __init__(
@@ -30,9 +31,9 @@ class SimpleModel(nn.Module):
         in_d = input_d
         for _ in range(n_hidden_layers):
             lin = nn.Linear(in_d, hidden_d)
-            bn  = nn.BatchNorm1d(hidden_d)
+            bn = nn.BatchNorm1d(hidden_d)
             act = nn.GELU()
-            do  = nn.Dropout(dropout)
+            do = nn.Dropout(dropout)
 
             if order == "linear_bn_act_do":
                 layers += [lin, bn, act, do]
