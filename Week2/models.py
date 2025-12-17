@@ -53,9 +53,11 @@ class SimpleModel(nn.Module):
         self.backbone = nn.Sequential(*layers)
         self.output_layer = nn.Linear(hidden_d, output_d)
 
-    def forward(self, x):
+    def forward(self, x, return_features: bool = False):
         x = x.view(x.shape[0], -1)
         if self.input_l2norm:
             x = F.normalize(x, p=2, dim=1)
         x = self.backbone(x)
+        if return_features:
+            return x
         return self.output_layer(x)
