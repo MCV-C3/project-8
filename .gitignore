@@ -8,3 +8,5 @@ __init__.py
 
 data/*
 Week1/data/*
+wandb/*
+plots/*
