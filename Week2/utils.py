@@ -6,6 +6,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision.datasets import ImageFolder
+import matplotlib.pyplot as plt
 
 def softmax(x):
     """Compute softmax values for each sets of scores in x."""
@@ -55,18 +56,45 @@ class PatchDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx):        
         path, label = self.samples[idx]
         img = np.array(Image.open(path).convert("RGB"))
-
-        patches = image.extract_patches_2d(
-            img,
-            patch_size=(self.patch_size, self.patch_size),
-            max_patches=self.num_patches
-        )
+    
+        if self.num_patches == 1:
+            patches = [img]
+        else:
+            patches = image.extract_patches_2d(
+                img,
+                patch_size=(self.patch_size, self.patch_size),
+                max_patches=self.num_patches
+            )
 
         patches = torch.stack([
             self.transform(patch) for patch in patches
         ])
+        
+        # if idx == 0:
+        #     self._visualize(img, patches)
 
         return patches, label
+    
+    def _visualize(self, img, patches): 
+        n = len(patches)
+        cols = min(n + 1, 5)
+    
+        plt.figure(figsize=(3 * cols, 3))
+    
+        # Original image (already HWC)
+        plt.subplot(1, cols, 1)
+        plt.imshow(img)
+        plt.title("Original")
+        plt.axis("off")
+    
+        for i, patch in enumerate(patches):
+            plt.subplot(1, cols, i + 2)
+            plt.imshow(patch.permute(1, 2, 0).cpu())
+            plt.title(f"Patch {i}")
+            plt.axis("off")
+    
+        plt.tight_layout()
+        plt.show()

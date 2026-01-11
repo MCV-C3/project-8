@@ -1,13 +1,15 @@
-from typing import List, Literal
+from typing import List, Literal, Tuple, Union
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 Order = Literal[
-    "linear_bn_act_do",  # Linear -> BN -> GELU -> Dropout (el teu actual)
-    "do_linear_bn_act",  # Dropout -> Linear -> BN -> GELU (input dropout)
-    "bn_act_linear_do",  # BN -> GELU -> Linear -> Dropout (pre-activation style)
+    "linear_bn_act_do",  # Linear -> BN -> ACT -> Dropout
+    "do_linear_bn_act",  # Dropout -> Linear -> BN -> ACT
+    "bn_act_linear_do",  # (aprox) Linear -> BN -> ACT -> Dropout
 ]
+ActName = Literal["gelu", "relu"]
 
 
 class SimpleModel(nn.Module):
@@ -20,6 +22,7 @@ class SimpleModel(nn.Module):
         dropout: float = 0.6,
         order: Order = "linear_bn_act_do",
         input_l2norm: bool = False,
+        activation: ActName = "gelu",
     ):
         super().__init__()
         assert n_hidden_layers >= 1
@@ -27,12 +30,14 @@ class SimpleModel(nn.Module):
         self.input_l2norm = input_l2norm
         self.order = order
 
+        Act = nn.GELU if activation == "gelu" else nn.ReLU
+
         layers: List[nn.Module] = []
         in_d = input_d
         for _ in range(n_hidden_layers):
             lin = nn.Linear(in_d, hidden_d)
             bn = nn.BatchNorm1d(hidden_d)
-            act = nn.GELU()
+            act = Act()
             do = nn.Dropout(dropout)
 
             if order == "linear_bn_act_do":
@@ -40,10 +45,7 @@ class SimpleModel(nn.Module):
             elif order == "do_linear_bn_act":
                 layers += [do, lin, bn, act]
             elif order == "bn_act_linear_do":
-                # atenció: BN necessita dimension hidden_d, així que fem Linear primer per arribar-hi
-                # i després apliquem BN/act abans de la següent capa: implementem com:
-                # Linear -> BN -> GELU -> Dropout, però amb "preact" per capes següents no és trivial en Sequential
-                # Solució simple (i efectiva): fem l’ordre "BN/act abans" només després del Linear:
+                # aproximació simple estable
                 layers += [lin, bn, act, do]
             else:
                 raise ValueError(f"Unknown order: {order}")
@@ -53,11 +55,22 @@ class SimpleModel(nn.Module):
         self.backbone = nn.Sequential(*layers)
         self.output_layer = nn.Linear(hidden_d, output_d)
 
-    def forward(self, x, return_features: bool = False):
+    def forward(
+        self, x: torch.Tensor, return_features: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Returns:
+          - logits if return_features=False
+          - (logits, features) if return_features=True
+        features are the backbone output: shape (B, hidden_d)
+        """
         x = x.view(x.shape[0], -1)
         if self.input_l2norm:
             x = F.normalize(x, p=2, dim=1)
-        x = self.backbone(x)
+
+        feats = self.backbone(x)  # (B, hidden_d)
+        logits = self.output_layer(feats)  # (B, output_d)
+
         if return_features:
-            return x
-        return self.output_layer(x)
+            return logits, feats
+        return logits

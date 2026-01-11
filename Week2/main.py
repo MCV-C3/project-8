@@ -1,5 +1,4 @@
 import os
-from typing import Dict
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,76 +8,30 @@ import torch.optim as optim
 import torchvision.transforms.v2 as F
 import tqdm
 from models import SimpleModel
+from sklearn.metrics import accuracy_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from utils import PatchDataset
 
 
-def train(
-    model, dataloader, criterion, optimizer, device, class_names, plot_once=False
-):
-    model.train()
-    loss_sum, correct, total = 0.0, 0, 0
-    for x, y in dataloader:
-        # x with patches: [B, N, 3, H, W]
-        B, N, C, H, W = x.shape
-        x, y = x.to(device), y.to(device)
-        x = x.view(B * N, C, H, W)
-
-        logits = model(x)
-        logits = logits.view(B, N, -1)
-        img_logits = logits.mean(dim=1)
-
-        if plot_once:
-            # take first image in batch
-            patch_probs = torch.softmax(logits[0], dim=1)  # [N, classes]
-            merged_probs = torch.softmax(img_logits[0], dim=0)  # [classes]
-
-            _plot_patch_merge(patch_probs.cpu(), merged_probs.cpu(), class_names)
-
-            plot_once = False
-
-        loss = criterion(img_logits, y)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        loss_sum += loss.item() * x.size(0)
-        correct += (img_logits.argmax(1) == y).sum().item()
-        total += y.size(0)
-
-    return loss_sum / total, correct / total
-
-
-@torch.no_grad()
-def test(model, dataloader, criterion, device):
-    model.eval()
-    loss_sum, correct, total = 0.0, 0, 0
-    for x, y in dataloader:
-        B, N, C, H, W = x.shape
-        x, y = x.to(device), y.to(device)
-        x = x.view(B * N, C, H, W)
-
-        logits = model(x)
-        logits = logits.view(B, N, -1)
-        img_logits = logits.mean(dim=1)
-
-        loss = criterion(img_logits, y)
-        loss_sum += loss.item() * x.size(0)
-        correct += (img_logits.argmax(1) == y).sum().item()
-        total += y.size(0)
-    return loss_sum / total, correct / total
+# -----------------------------
+# helpers
+# -----------------------------
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
 
 
 @torch.no_grad()
 def compute_mean_std(loader, max_batches=50):
     n = 0
     mean = torch.zeros(3)
-    m2 = torch.zeros(3)  # second moment
+    m2 = torch.zeros(3)
     for i, (x, _) in enumerate(loader):
         if i >= max_batches:
             break
-        # x in [0,1], shape [B,3,H,W]
         b = x.size(0)
         x = x.view(b, 3, -1)
         mean += x.mean(dim=2).sum(dim=0)
@@ -90,233 +43,260 @@ def compute_mean_std(loader, max_batches=50):
     return mean.tolist(), std.tolist()
 
 
-def make_tf(img, normalize_mode: str, mean, std, grayscale: bool):
-    ops = [
-        F.ToImage(),
-        F.ToDtype(torch.float32, scale=True),
-        F.Resize((img, img)),
-    ]
-    if grayscale:
-        # manté 3 canals (compatible amb mean/std 3D)
-        ops.append(F.Grayscale(num_output_channels=3))
+# -----------------------------
+# train / test (patch-based)
+# -----------------------------
+def train_epoch(model, dataloader, criterion, optimizer, device):
+    model.train()
+    loss_sum, correct, total = 0.0, 0, 0
 
-    if normalize_mode == "imagenet":
-        ops.append(F.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]))
-    elif normalize_mode == "dataset":
-        ops.append(F.Normalize(mean=mean, std=std))
-    elif normalize_mode == "none":
-        pass
-    else:
-        raise ValueError(normalize_mode)
+    for x, y in dataloader:
+        # x: [B, N, 3, H, W]
+        B, N, C, H, W = x.shape
+        x, y = x.to(device), y.to(device)
+        x = x.view(B * N, C, H, W)
 
-    return F.Compose(ops)
+        logits = model(x)  # [B*N, K]
+        logits = logits.view(B, N, -1)  # [B, N, K]
+        img_logits = logits.mean(dim=1)  # [B, K]
+
+        loss = criterion(img_logits, y)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        loss_sum += loss.item() * B
+        correct += (img_logits.argmax(1) == y).sum().item()
+        total += B
+
+    return loss_sum / total, correct / total
 
 
 @torch.no_grad()
-def _plot_patch_merge(patch_probs, merged_probs, class_names, topk=5):
-    top = torch.topk(merged_probs, topk)
-    cls = top.indices.numpy()
+def test_epoch(model, dataloader, criterion, device):
+    model.eval()
+    loss_sum, correct, total = 0.0, 0, 0
 
-    x = np.arange(topk)
-    width = 0.15
+    for x, y in dataloader:
+        B, N, C, H, W = x.shape
+        x, y = x.to(device), y.to(device)
+        x = x.view(B * N, C, H, W)
 
-    plt.figure(figsize=(10, 4))
+        logits = model(x)
+        logits = logits.view(B, N, -1)
+        img_logits = logits.mean(dim=1)
 
-    for i in range(patch_probs.shape[0]):
-        plt.bar(x + i * width, patch_probs[i, cls], width, label=f"Patch {i}")
+        loss = criterion(img_logits, y)
+        loss_sum += loss.item() * B
+        correct += (img_logits.argmax(1) == y).sum().item()
+        total += B
 
-    plt.bar(
-        x + patch_probs.shape[0] * width,
-        merged_probs[cls],
-        width,
-        label="Merged",
-        color="black",
-    )
-
-    plt.xticks(
-        x + width * patch_probs.shape[0] / 2, [class_names[i] for i in cls], rotation=30
-    )
-
-    plt.ylabel("Probability")
-    plt.title("Patch predictions → merged prediction")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    return loss_sum / total, correct / total
 
 
-def plot_metrics(train_metrics: Dict, test_metrics: Dict, metric_name: str):
+# -----------------------------
+# feature extraction for SVM
+# -----------------------------
+@torch.no_grad()
+def extract_single_feature_1d(model, dataloader, device, mode="mean", dim_idx=0):
     """
-    Plots and saves metrics for training and testing.
-
-    Args:
-        train_metrics (Dict): Dictionary containing training metrics.
-        test_metrics (Dict): Dictionary containing testing metrics.
-        metric_name (str): The name of the metric to plot (e.g., "loss", "accuracy").
-
-    Saves:
-        - loss.png for loss plots
-        - metrics.png for other metrics plots
+    Returns X: (num_images, 1) and y: (num_images,)
+    Requires: model(x, return_features=True) -> (logits, feats)
+    feats expected shape: (B*N, hidden_d)
     """
+    model.eval()
+    X_list, y_list = [], []
+
+    for x, y in dataloader:
+        B, N, C, H, W = x.shape
+        x = x.to(device)
+
+        x = x.view(B * N, C, H, W)
+        _, feats = model(x, return_features=True)  # (B*N, hidden_d)
+        feats = feats.view(B, N, -1).mean(dim=1)  # (B, hidden_d) per image
+
+        if mode == "mean":
+            one = feats.mean(dim=1, keepdim=True)  # (B,1)
+        elif mode == "dim":
+            one = feats[:, dim_idx : dim_idx + 1]  # (B,1)
+        else:
+            raise ValueError("mode must be 'mean' or 'dim'")
+
+        X_list.append(one.cpu().numpy())
+        y_list.append(y.numpy())
+
+    X = np.concatenate(X_list, axis=0)
+    y = np.concatenate(y_list, axis=0)
+    return X, y
+
+
+def train_eval_svm_1d(Xtr, ytr, Xte, yte, C=1.0):
+    clf = make_pipeline(StandardScaler(), LinearSVC(C=C, dual=True, max_iter=10000))
+    clf.fit(Xtr, ytr)
+    pred = clf.predict(Xte)
+    return accuracy_score(yte, pred)
+
+
+# -----------------------------
+# plots
+# -----------------------------
+def save_loss_plot(train_losses, test_losses, outpath):
     plt.figure(figsize=(10, 6))
-    plt.plot(train_metrics[metric_name], label=f"Train {metric_name.capitalize()}")
-    plt.plot(test_metrics[metric_name], label=f"Test {metric_name.capitalize()}")
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(test_losses, label="Test Loss")
     plt.xlabel("Epoch")
-    plt.ylabel(metric_name.capitalize())
-    plt.title(f"{metric_name.capitalize()} Over Epochs")
+    plt.ylabel("Loss")
+    plt.title("End-to-End Train/Test Loss")
     plt.legend()
     plt.grid(True)
-
-    # Save the plot with the appropriate name
-    filename = "loss.png" if metric_name.lower() == "loss" else "metrics.png"
-    plt.savefig(filename)
-    print(f"Plot saved as {filename}")
-
-    plt.close()  # Close the figure to free memory
+    plt.tight_layout()
+    plt.savefig(outpath)
+    plt.close()
+    print("Saved:", outpath)
 
 
+def save_acc_plot(train_accs, test_accs, outpath):
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_accs, label="Train Acc")
+    plt.plot(test_accs, label="Test Acc")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("End-to-End Train/Test Accuracy")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(outpath)
+    plt.close()
+    print("Saved:", outpath)
+
+
+# -----------------------------
+# main
+# -----------------------------
 if __name__ == "__main__":
     torch.manual_seed(42)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
 
-    train_path = os.path.expanduser("./data/train")
-    test_path = os.path.expanduser("./data/val")
+    train_path = os.path.expanduser("./data/2425/MIT_large_train/train")
+    test_path = os.path.expanduser("./data/2425/MIT_large_train/test")
 
     IMG = 64
-    EPOCHS = 300
-    NUM_PATCHES = [16]
+    NUM_PATCHES = 16
+    EPOCHS = 50
 
-    # 1) dataset mean/std (aprox)
+    # Best model hyperparams (fixed)
+    BASE = dict(
+        n_hidden_layers=3,
+        hidden_d=768,
+        dropout=0.6,
+        activation="gelu",
+        order="linear_bn_act_do",
+        input_l2norm=False,
+        lr=2e-4,
+        wd=1e-4,
+    )
+
+    ensure_dir("plots")
+
+    # 1) dataset mean/std
     tf0 = F.Compose(
-        [F.ToImage(), F.ToDtype(torch.float32, scale=True), F.Resize((IMG, IMG))]
+        [
+            F.ToImage(),
+            F.ToDtype(torch.float32, scale=True),
+            F.Resize((IMG, IMG)),
+        ]
     )
     tmp_train = ImageFolder(train_path, transform=tf0)
     tmp_loader = DataLoader(tmp_train, batch_size=256, shuffle=True, num_workers=8)
+
     ds_mean, ds_std = compute_mean_std(tmp_loader, max_batches=50)
     print("Dataset mean:", ds_mean)
     print("Dataset std :", ds_std)
 
-    # 2) experiments “tot a la vegada” (16 runs)
-    # Base hiperparams (els teus millors)
-    base = dict(n_hidden_layers=3, hidden_d=768, dropout=0.6, lr=0.0002, wd=1e-4)
-
-    preprocess_variants = [
-        # ("imagenet", False),
-        ("dataset", False),
-        # ("dataset",  True),   # grayscale
-        # ("imagenet", True),   # grayscale
-    ]
-
-    model_variants = [
-        ("linear_bn_act_do", False),  # ordre normal, no L2
-        # ("linear_bn_act_do", True),    # + input L2
-        # ("do_linear_bn_act", False),   # input dropout ordre
-        # ("do_linear_bn_act", True),    # input dropout + input L2
-    ]
-
-    # construeix lista configs
-    experiments = []
-    for norm_mode, gray in preprocess_variants:
-        for order, l2 in model_variants:
-            name = f"N{norm_mode}_G{int(gray)}_O{order}_L2{int(l2)}"
-            experiments.append(
-                dict(
-                    name=name,
-                    norm_mode=norm_mode,
-                    grayscale=gray,
-                    order=order,
-                    input_l2=l2,
-                )
-            )
-            best_model = dict(
-                name=name, norm_mode=norm_mode, grayscale=gray, order=order, input_l2=l2
-            )
-
-    all_results = []
-    train_losses = []
-    test_losses = []
-    train_accuracies = []
-    test_accuracies = []
-    for n_patches in NUM_PATCHES:
-        print("\n==============================")
-        print("RUN:", best_model["name"])
-        print("==============================")
-
-        train_tf = make_tf(
-            IMG, best_model["norm_mode"], ds_mean, ds_std, best_model["grayscale"]
-        )
-        test_tf = make_tf(
-            IMG, best_model["norm_mode"], ds_mean, ds_std, best_model["grayscale"]
-        )
-
-        data_train = PatchDataset(
-            train_path, train_tf, patch_size=IMG, num_patches=n_patches
-        )
-        data_test = PatchDataset(
-            test_path, test_tf, patch_size=IMG, num_patches=n_patches
-        )
-
-        num_classes = len(ImageFolder(train_path).classes)
-
-        train_loader = DataLoader(
-            data_train, batch_size=64, pin_memory=True, shuffle=True, num_workers=8
-        )
-        test_loader = DataLoader(
-            data_test, batch_size=64, pin_memory=True, shuffle=False, num_workers=8
-        )
-
-        patches, label = data_train[0]
-
-        C, H, W = 3, IMG, IMG
-        input_d = C * H * W
-
-        model = SimpleModel(
-            input_d=input_d,
-            hidden_d=base["hidden_d"],
-            output_d=num_classes,
-            n_hidden_layers=base["n_hidden_layers"],
-            dropout=base["dropout"],
-            order=best_model["order"],
-            input_l2norm=best_model["input_l2"],
-        ).to(device)
-
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(
-            model.parameters(), lr=base["lr"], weight_decay=base["wd"]
-        )
-
-        class_names = data_train.dataset.classes
-        best_test_l = float("inf")
-        for epoch in tqdm.tqdm(range(EPOCHS), desc=f"TRAIN {n_patches}"):
-            tr_l, tr_a = train(
-                model, train_loader, criterion, optimizer, device, class_names
-            )
-            te_l, te_a = test(model, test_loader, criterion, device)
-
-            train_losses.append(tr_l)
-            test_losses.append(te_l)
-            train_accuracies.append(tr_a)
-            test_accuracies.append(te_a)
-            if te_l < best_test_l:
-                # Save the trained model
-                model_save_path = f"mlp_model_{n_patches}_patches.pth"
-                torch.save(model.state_dict(), model_save_path)
-                print(f"Model saved to {model_save_path}")
-
-            best_test_l = min(best_test_l, te_l)
-            print(
-                f"Epoch {epoch + 1:02d}/{EPOCHS} | train loss {tr_l:.4f} | train acc {tr_a:.4f} | test loss {te_l:.4f} | test acc {te_a:.4f}"
-            )
-
-        all_results.append(("TRAIN " + str(n_patches), best_test_l))
-
-    plot_metrics({"loss": train_losses}, {"loss": test_losses}, metric_name="loss")
-    plot_metrics(
-        {"accuracy": train_accuracies},
-        {"accuracy": test_accuracies},
-        metric_name="accuracy",
+    # 2) final transform (dataset normalize)
+    tf = F.Compose(
+        [
+            F.ToImage(),
+            F.ToDtype(torch.float32, scale=True),
+            F.Resize((IMG, IMG)),
+            F.Normalize(mean=ds_mean, std=ds_std),
+        ]
     )
-    print("\n===== SUMMARY (best test loss) =====")
-    for name, acc in sorted(all_results, key=lambda x: x[1], reverse=False):
-        print(f"{name:60s} {acc:.4f}")
+
+    # 3) datasets/loaders with 16 patches
+    train_ds = PatchDataset(train_path, tf, patch_size=IMG, num_patches=NUM_PATCHES)
+    test_ds = PatchDataset(test_path, tf, patch_size=IMG, num_patches=NUM_PATCHES)
+
+    num_classes = len(ImageFolder(train_path).classes)
+    print("Num classes:", num_classes)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=64,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=8,
+        persistent_workers=True,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=64,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=8,
+        persistent_workers=True,
+    )
+
+    # 4) model
+    model = SimpleModel(
+        input_d=3 * IMG * IMG,
+        hidden_d=BASE["hidden_d"],
+        output_d=num_classes,
+        n_hidden_layers=BASE["n_hidden_layers"],
+        dropout=BASE["dropout"],
+        activation=BASE["activation"],
+        order=BASE["order"],
+        input_l2norm=BASE["input_l2norm"],
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=BASE["lr"], weight_decay=BASE["wd"])
+
+    # 5) train end-to-end + store curves
+    train_losses, test_losses = [], []
+    train_accs, test_accs = [], []
+    best_test_acc = 0.0
+
+    for epoch in tqdm.tqdm(range(EPOCHS), desc=f"TRAIN E2E (patches={NUM_PATCHES})"):
+        tr_l, tr_a = train_epoch(model, train_loader, criterion, optimizer, device)
+        te_l, te_a = test_epoch(model, test_loader, criterion, device)
+
+        train_losses.append(tr_l)
+        test_losses.append(te_l)
+        train_accs.append(tr_a)
+        test_accs.append(te_a)
+        best_test_acc = max(best_test_acc, te_a)
+
+        if (epoch + 1) % 5 == 0:
+            print(
+                f"Epoch {epoch + 1:02d}/{EPOCHS} | train acc {tr_a:.4f} | test acc {te_a:.4f}"
+            )
+
+    print("\n[END-TO-END] best test acc:", best_test_acc)
+
+    # save plots
+    save_loss_plot(train_losses, test_losses, "plots/loss.png")
+    save_acc_plot(train_accs, test_accs, "plots/test_acc.png")
+
+    # 6) SVM with a single feature (1D)
+    # choose one:
+    # - mode="mean": scalar = mean over hidden vector
+    # - mode="dim": scalar = one feature dimension (dim_idx)
+    Xtr, ytr = extract_single_feature_1d(model, train_loader, device, mode="mean")
+    Xte, yte = extract_single_feature_1d(model, test_loader, device, mode="mean")
+    svm_acc = train_eval_svm_1d(Xtr, ytr, Xte, yte, C=1.0)
+
+    print("\n[SVM-1D] test acc:", svm_acc)
+    print("[COMPARISON] End-to-End best test acc:", best_test_acc)
