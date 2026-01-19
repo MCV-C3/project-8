@@ -13,6 +13,7 @@ dependencies = [
     "pillow>=12.0.0",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
+    "torchsummary>=1.5.1",
     "torchview>=0.2.7",
     "torchvision>=0.24.1",
     "torchviz>=0.0.3",
