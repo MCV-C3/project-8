@@ -1,0 +1,12 @@
+.DS_Store
+.vscode
+__pycache__/
+__init__.py
+.idea/
+.env
+.github
+
+data/*
+Week1/data/*
+wandb/*
+plots/*
