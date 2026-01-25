@@ -13,6 +13,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 from torch.utils.data import DataLoader
+from torchsummary import summary
 from torchvision.datasets import ImageFolder
 from utils import PatchDataset
 
@@ -260,6 +261,12 @@ if __name__ == "__main__":
         order=BASE["order"],
         input_l2norm=BASE["input_l2norm"],
     ).to(device)
+
+    print(summary(model, (3, IMG, IMG)))
+    print(
+        "Model parameters:",
+        sum(p.numel() for p in model.parameters() if p.requires_grad),
+    )
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=BASE["lr"], weight_decay=BASE["wd"])

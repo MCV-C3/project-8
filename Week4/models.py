@@ -15,6 +15,42 @@ from torchview import draw_graph
 from torchvision import models
 
 
+class SimpleCNNv1(nn.Module):
+    def __init__(self, num_classes):
+        super(SimpleCNNv1, self).__init__()
+
+        def block(in_c, out_c, dropout_rate=0.3):
+            return nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(),
+                nn.Conv2d(out_c, out_c, 3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(),
+                nn.MaxPool2d(2),
+                nn.Dropout(dropout_rate),
+            )
+
+        self.b1 = block(3, 32)  # 128 → 64
+        self.b2 = block(32, 64)  # 64 → 32
+        self.b3 = block(64, 128)  # 32 → 16
+
+        self.dropout_fc = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(128 * 16 * 16, 256)
+        self.fc2 = nn.Linear(256, num_classes)
+
+    def forward(self, x):
+        x = self.b1(x)
+        x = self.b2(x)
+        x = self.b3(x)
+
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.dropout_fc(functional.relu(self.fc1(x)))
+        x = self.fc2(x)
+
+        return x
+
+
 class SimpleCNNv2(nn.Module):
     def __init__(self, num_classes, dropout_rate=0.2):
         super().__init__()
@@ -28,13 +64,13 @@ class SimpleCNNv2(nn.Module):
                 nn.Dropout(dropout_rate),
             )
 
-        self.b1 = block(3, 4)  # 64 → 32
-        self.b2 = block(4, 8)  # 32 → 16
+        self.b1 = block(3, 32)  # 64 → 32
+        self.b2 = block(32, 16)  # 32 → 16
         # self.b3 = block(64, 128)  # 16 → 8
 
         self.dropout_fc = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(8 * 8 * 8, 32)
-        self.fc2 = nn.Linear(32, num_classes)
+        self.fc1 = nn.Linear(16 * 16 * 16, 16)
+        self.fc2 = nn.Linear(16, num_classes)
 
     def forward(self, x):
         x = self.b1(x)
@@ -91,9 +127,11 @@ class SimpleCNNv3(nn.Module):
                 3, self.b1_out, kernel_size=1, stride=2
             ),  # stride=2 to match MaxPool
         )
+        self.skip1_relu = nn.ReLU()
         self.skip2 = nn.Sequential(
             nn.Conv2d(self.b1_out, self.b2_out, kernel_size=1, stride=2),
         )
+        self.skip2_relu = nn.ReLU()
 
         self.dropout_fc = nn.Dropout(dropout_rate)
         self.fc1 = nn.Linear(self.fc1_input_size * self.b2_out, self.fc1_out)
@@ -103,12 +141,12 @@ class SimpleCNNv3(nn.Module):
         previous_input = x
         out = self.b1(x)
         out = out + self.skip1(previous_input)
-        out = functional.relu(out)
+        out = self.skip1_relu(out)
 
         previous_input = out
         out = self.b2(out)
         out = out + self.skip2(previous_input)
-        out = functional.relu(out)
+        out = self.skip2_relu(out)
 
         out = out.view(out.size(0), -1)
         out = self.dropout_fc(functional.relu(self.fc1(out)))
@@ -166,9 +204,11 @@ class SimpleCNNvAttn(nn.Module):
                 3, self.b1_out, kernel_size=1, stride=2
             ),  # stride=2 to match MaxPool
         )
+        self.skip1_relu = nn.ReLU()
         self.skip2 = nn.Sequential(
             nn.Conv2d(self.b1_out, self.b2_out, kernel_size=1, stride=2),
         )
+        self.skip2_relu = nn.ReLU()
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(self.b2_out, num_classes, bias=True)
@@ -184,10 +224,12 @@ class SimpleCNNvAttn(nn.Module):
         previous_input = x
         out = self.b1(x)
         out = out + self.skip1(previous_input)
+        out = self.skip1_relu(out)
         out = self.attn1(out) if self.attn1 is not None else out
         previous_input = out
         out = self.b2(out)
         out = out + self.skip2(previous_input)
+        out = self.skip2_relu(out)
         out = self.attn2(out) if self.attn2 is not None else out
 
         out = self.avgpool(out)
@@ -218,12 +260,16 @@ class SimpleCNNvAttn(nn.Module):
 
 # https://github.com/pytorch/vision/blob/main/torchvision/models/shufflenetv2.py
 class ShuffleCNNvAttn(nn.Module):
-    def __init__(self, num_classes, dropout_rate=0.2, use_attn=True):
+    def __init__(
+        self,
+        num_classes,
+        dropout_rate=0.2,
+        use_attn=True,
+        knowledge_distillation=False,
+    ):
         super().__init__()
 
-        self.b1_out = 16
-        self.b2_out = 16
-        self.b3_out = 16
+        self.b1_out = self.b2_out = self.b3_out = 16
         input_channels = 3
 
         self.conv1 = nn.Sequential(
@@ -243,6 +289,13 @@ class ShuffleCNNvAttn(nn.Module):
             self.attn1 = None
             self.attn2 = None
 
+        if knowledge_distillation:
+            self.regressor = nn.Sequential(
+                nn.Conv2d(self.b3_out, 112, kernel_size=3, padding=1),
+            )
+        else:
+            self.regressor = None
+
         self.conv4 = nn.Sequential(
             nn.Conv2d(self.b3_out, self.b3_out, 1, 1, 0, bias=False),
             nn.BatchNorm2d(self.b3_out),
@@ -250,6 +303,7 @@ class ShuffleCNNvAttn(nn.Module):
         )
 
         self.fc = nn.Linear(self.b3_out, num_classes, bias=True)
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
@@ -266,10 +320,16 @@ class ShuffleCNNvAttn(nn.Module):
         out = self.attn2(out) if self.attn2 is not None else out
 
         out = self.conv4(out)
+
+        if self.regressor is not None:
+            regressor_output = self.regressor(out)
+        else:
+            regressor_output = None
+
         out = out.mean([2, 3])
 
         out = self.fc(out)
-        return out
+        return out, regressor_output
 
     def extract_grad_cam(
         self,
@@ -436,23 +496,48 @@ class SelfAtt(nn.Module):
             return out
 
 
-class WraperModel(nn.Module):
-    def __init__(self, num_classes: int, feature_extraction: bool = True):
-        super(WraperModel, self).__init__()
+class TeacherModel(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        feature_extraction: bool = True,
+        arch_type: str = "original",
+        dropout_rate: float = 0.2,
+        use_batchnorm: bool = False,
+    ):
+        super(TeacherModel, self).__init__()
 
-        # Load pretrained VGG16 model
-        self.backbone = models.vgg16(weights="IMAGENET1K_V1")
+        # Load pretrained EfficientNet-B0 model
+        self.backbone = models.efficientnet_b0(weights="IMAGENET1K_V1")
 
         if feature_extraction:
             self.set_parameter_requires_grad(feature_extracting=feature_extraction)
 
-        # Modify the classifier for the number of classes
-        self.backbone.classifier[-1] = nn.Linear(
-            self.backbone.classifier[-1].in_features, num_classes
-        )
+        if arch_type == "modified":
+            # Remove last N=3 blocks: keeps blocks 0-5, output channels = 112
+            N = 3
+            self.backbone.features = nn.Sequential(
+                *list(self.backbone.features.children())[:-N]
+            )
+            in_features = 112  # Output channels after removing last 3 blocks
+        else:
+            # Original architecture: 1280 features from EfficientNet-B0
+            in_features = 1280
+
+        # added for task 4 & 5: evaluate different methodologies to improve learning curve
+        # Build classifier: [BatchNorm?] -> [Dropout?] -> Linear(output)
+        layers = []
+        if use_batchnorm:
+            layers.append(nn.BatchNorm1d(in_features))
+        if dropout_rate > 0:
+            layers.append(nn.Dropout(p=dropout_rate))
+        layers.append(nn.Linear(in_features, num_classes))
+
+        self.backbone.classifier = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.backbone(x)
+        conv_feature_map = self.backbone.features(x)
+        return self.backbone(x), conv_feature_map
 
     def extract_feature_maps(self, input_image: torch.Tensor):
         conv_weights = []
@@ -547,7 +632,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
 
     # Load a pretrained model and modify it
-    model = WraperModel(num_classes=8, feature_extraction=False)
+    model = TeacherModel(num_classes=8, feature_extraction=False)
     # model.load_state_dict(torch.load("saved_model.pt"))
     # model = model
 

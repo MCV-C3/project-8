@@ -20,6 +20,7 @@ from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, Subset
+from torchsummary import summary
 from torchvision.datasets import ImageFolder
 from torchvision.transforms import (
     ColorJitter,
@@ -1225,8 +1226,8 @@ if __name__ == "__main__":
         os.makedirs(out_dir, exist_ok=True)
 
         base_root = "./data/2425"  # ajusta si cal
-        train_path = os.path.join(base_root, "MIT_large_train", "train")
-        test_path = os.path.join(base_root, "MIT_large_train", "test")
+        train_path = os.path.join(base_root, "MIT_small_train_1", "train")
+        test_path = os.path.join(base_root, "MIT_small_train_1", "test")
         train_transform = get_transform_aug()
         dataset_train = ImageFolder(train_path, transform=train_transform)
         num_classes = len(dataset_train.classes)
@@ -1293,8 +1294,10 @@ if __name__ == "__main__":
             )
         )
 
+        torch.save(model_best, "./teacher_model.pth")
         # Load best model for evaluation
         model.load_state_dict(model_best)
+        print(summary(model, (3, 224, 224)))
 
         y_true, y_score = evaluate_and_export_scores(
             model=model,
